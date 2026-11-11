@@ -1,74 +1,62 @@
 <!--
-Thank you for contributing to TiDB! Please read TiDB's [CONTRIBUTING](https://github.com/pingcap/tidb/blob/master/CONTRIBUTING.md) document **BEFORE** filing this PR.
+
+Thank you for contributing to TiDB!
+
+PR Title Format:
+1. pkg [, pkg2, pkg3]: what's changed
+2. *: what's changed
+
 -->
 
-## What have you changed? (mandatory)
-
+### What problem does this PR solve?
 <!--
-Please explain **IN DETAIL** what the changes are in this PR and why they are needed:
-- Summarize your change (mandatory)
-- How does this PR work? Need a brief introduction for the changed logic (optional)
-- Separately describe each logical change and avoid lazy messages (optional)
-- Describe any limitations of the current code (optional)
 
-Please **NOTE** that:
-- Do not assume reviewers understand the original issue
+Please create an issue first to describe the problem.
+
+There MUST be one line starting with "Issue Number:  " and
+linking the relevant issues via the "close" or "ref".
+
+For more info, check https://pingcap.github.io/tidb-dev-guide/contribute-to-tidb/contribute-code.html#referring-to-an-issue.
+
 -->
 
-## What is the type of the changes? (mandatory)
+Issue Number: close #xxx
 
-<!--
-The currently defined types are listed below, please pick one of the types for this PR by removing the others.
--->
+Problem Summary:
 
-- New feature (non-breaking change which adds functionality)
-- Improvement (non-breaking change which is an improvement to an existing feature)
-- Bug fix (non-breaking change which fixes an issue)
-- Breaking change (fix or feature that would cause existing functionality to not work as expected)
+### What changed and how does it work?
 
-## How has this PR been tested? (mandatory)
+### Check List
 
-<!--
-Please describe the tests that you ran to verify your changes.
-Have you finished unit tests, integration tests, or manual tests?
-What additional tests would give you greater confidence in this change?
--->
+Tests <!-- At least one of them must be included. -->
 
-## Does this PR affect documentation (docs/docs-cn) update? (mandatory)
+- [ ] Unit test
+- [ ] Integration test
+- [ ] Manual test (add detailed scripts or steps below)
+- [ ] No need to test
+  > - [ ] I checked and no code files have been changed.
+  > <!-- Or your custom  "No need to test" reasons -->
 
-<!--
-If there is document change, please file a PR in ([docs](https://github.com/pingcap/docs) or [docs-cn](https://github.com/pingcap/docs-cn)) and add the PR number here.
--->
+Side effects
 
-## Does this PR affect tidb-ansible update? (mandatory)
+- [ ] Performance regression: Consumes more CPU
+- [ ] Performance regression: Consumes more Memory
+- [ ] Breaking backward compatibility
 
-<!--
-If there is a configuration or metrics change, please file a PR in [tidb-ansible](https://github.com/pingcap/tidb-ansible), and add the PR number here.
--->
+Documentation
 
-## Does this PR need to be added to the release notes? (mandatory)
+- [ ] Affects user behaviors
+- [ ] Contains syntax changes
+- [ ] Contains variable changes
+- [ ] Contains experimental features
+- [ ] Changes MySQL compatibility
 
-<!--
-If this PR needs to be added to the release notes, please:
-1. add the "**release-note**" label for this PR
-2. write your release note in the below block
-3. if the PR requires additional action from users switching to the new
-   release, describe the concrete action that users need to take in detail.
+### Release note
 
-An example:
+<!-- compatibility change, improvement, bugfix, and new feature need a release note -->
+
+Please refer to [Release Notes Language Style Guide](https://pingcap.github.io/tidb-dev-guide/contribute-to-tidb/release-notes-style-guide.html) to write a quality release note.
+
+```release-note
+None
 ```
-release note:
-// put your release notes for this PR here.
-
-action required:
-// put your required action in detail here.
-```
--->
-
-
-## Refer to a related PR or issue link (optional)
-
-## Benchmark result if necessary (optional)
-
-## Add a few positive/negative examples (optional)
-

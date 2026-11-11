@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -15,32 +16,31 @@ package main
 
 import (
 	"encoding/json"
-	"io/ioutil"
 	"math/rand"
+	"os"
 	"time"
 
-	"github.com/juju/errors"
-	"github.com/pingcap/tidb/model"
-	stats "github.com/pingcap/tidb/statistics"
-	"github.com/pingcap/tidb/types"
-	"github.com/pingcap/tidb/util/chunk"
-	"github.com/pingcap/tidb/util/codec"
-	"github.com/pingcap/tidb/util/mock"
-	log "github.com/sirupsen/logrus"
+	"github.com/pingcap/errors"
+	"github.com/pingcap/log"
+	"github.com/pingcap/tidb/pkg/meta/model"
+	stats "github.com/pingcap/tidb/pkg/statistics"
+	"github.com/pingcap/tidb/pkg/statistics/handle/storage"
+	"github.com/pingcap/tidb/pkg/statistics/util"
+	"github.com/pingcap/tidb/pkg/types"
+	"go.uber.org/zap"
 )
 
 func loadStats(tblInfo *model.TableInfo, path string) (*stats.Table, error) {
-	data, err := ioutil.ReadFile(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	jsTable := &stats.JSONTable{}
+	jsTable := &util.JSONTable{}
 	err = json.Unmarshal(data, jsTable)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	handle := stats.NewHandle(mock.NewContext(), 0)
-	return handle.LoadStatsFromJSONToTable(tblInfo, jsTable)
+	return storage.TableStatsFromJSON(tblInfo, tblInfo.ID, jsTable)
 }
 
 type histogram struct {
@@ -66,18 +66,6 @@ func (h *histogram) getRandomBoundIdx() int {
 	return 0
 }
 
-func (h *histogram) decodeInt(row *chunk.Row) int64 {
-	if h.index == nil {
-		return row.GetInt64(0)
-	}
-	data := row.GetBytes(0)
-	_, result, err := codec.DecodeInt(data)
-	if err != nil {
-		log.Fatal(err)
-	}
-	return result
-}
-
 func (h *histogram) randInt() int64 {
 	idx := h.getRandomBoundIdx()
 	if idx%2 == 0 {
@@ -88,62 +76,17 @@ func (h *histogram) randInt() int64 {
 	return h.Bounds.GetRow(idx).GetInt64(0)
 }
 
-func (h *histogram) randFloat64() float64 {
-	idx := h.getRandomBoundIdx()
-	if idx%2 == 0 {
-		lower := h.Bounds.GetRow(idx).GetFloat64(0)
-		upper := h.Bounds.GetRow(idx + 1).GetFloat64(0)
-		rd := rand.Float64()
-		return lower + rd*(upper-lower)
-	}
-	return h.Bounds.GetRow(idx).GetFloat64(0)
-}
-
-func (h *histogram) randFloat32() float32 {
-	idx := h.getRandomBoundIdx()
-	if idx%2 == 0 {
-		lower := h.Bounds.GetRow(idx).GetFloat32(0)
-		upper := h.Bounds.GetRow(idx + 1).GetFloat32(0)
-		rd := rand.Float32()
-		return lower + rd*(upper-lower)
-	}
-	return h.Bounds.GetRow(idx).GetFloat32(0)
-}
-
-func (h *histogram) randDecimal() *types.MyDecimal {
-	idx := h.getRandomBoundIdx()
-	if idx%2 == 0 {
-		lower := h.Bounds.GetRow(idx).GetMyDecimal(0)
-		upper := h.Bounds.GetRow(idx + 1).GetMyDecimal(0)
-		rd := rand.Float64()
-		l, err := lower.ToFloat64()
-		if err != nil {
-			log.Fatal(err)
-		}
-		r, err := upper.ToFloat64()
-		if err != nil {
-			log.Fatal(err)
-		}
-		dec := &types.MyDecimal{}
-		err = dec.FromFloat64(l + rd*(r-l))
-		if err != nil {
-			log.Fatal(err)
-		}
-		return dec
-	}
-	return h.Bounds.GetRow(idx).GetMyDecimal(0)
-}
-
+// #nosec G404
 func getValidPrefix(lower, upper string) string {
 	for i := range lower {
 		if i >= len(upper) {
-			log.Fatalf("lower %s is larger than upper %s", lower, upper)
+			log.Fatal("lower is larger than upper", zap.String("lower", lower), zap.String("upper", upper))
 		}
 		if lower[i] != upper[i] {
 			randCh := uint8(rand.Intn(int(upper[i]-lower[i]))) + lower[i]
 			newBytes := make([]byte, i, i+1)
 			copy(newBytes, lower[:i])
-			newBytes = append(newBytes, byte(randCh))
+			newBytes = append(newBytes, randCh)
 			return string(newBytes)
 		}
 	}
@@ -153,13 +96,10 @@ func getValidPrefix(lower, upper string) string {
 func (h *histogram) getAvgLen(maxLen int) int {
 	l := h.Bounds.NumRows()
 	totalLen := 0
-	for i := 0; i < l; i++ {
+	for i := range l {
 		totalLen += len(h.Bounds.GetRow(i).GetString(0))
 	}
-	avg := totalLen / l
-	if avg > maxLen {
-		avg = maxLen
-	}
+	avg := min(totalLen/l, maxLen)
 	if avg == 0 {
 		avg = 1
 	}
@@ -191,21 +131,21 @@ func (h *histogram) randDate(unit string, mysqlFmt string, dateFmt string) strin
 		if diff == 0 {
 			str, err := lower.DateFormat(mysqlFmt)
 			if err != nil {
-				log.Fatal(err)
+				log.Fatal(err.Error())
 			}
 			return str
 		}
 		delta := randInt(0, int(diff)-1)
-		l, err := lower.Time.GoTime(time.Local)
+		l, err := lower.GoTime(time.Local)
 		if err != nil {
-			log.Fatal(err)
+			log.Fatal(err.Error())
 		}
 		l = l.AddDate(0, 0, delta)
 		return l.Format(dateFmt)
 	}
 	str, err := h.Bounds.GetRow(idx).GetTime(0).DateFormat(mysqlFmt)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal(err.Error())
 	}
 	return str
 }

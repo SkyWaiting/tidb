@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -17,32 +18,34 @@ import (
 	"database/sql"
 	"fmt"
 	"math"
+	"math/rand"
 	"strconv"
 	"strings"
 
-	_ "github.com/go-sql-driver/mysql"
-	"github.com/juju/errors"
-	"github.com/pingcap/tidb/mysql"
-	log "github.com/sirupsen/logrus"
+	mysql2 "github.com/go-sql-driver/mysql"
+	"github.com/pingcap/errors"
+	"github.com/pingcap/log"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"go.uber.org/zap"
 )
 
-func intRangeValue(column *column, min int64, max int64) (int64, int64) {
+func intRangeValue(column *column, minv, maxv int64) (int64, int64) {
 	var err error
 	if len(column.min) > 0 {
-		min, err = strconv.ParseInt(column.min, 10, 64)
+		minv, err = strconv.ParseInt(column.min, 10, 64)
 		if err != nil {
-			log.Fatal(err)
+			log.Fatal(err.Error())
 		}
 
 		if len(column.max) > 0 {
-			max, err = strconv.ParseInt(column.max, 10, 64)
+			maxv, err = strconv.ParseInt(column.max, 10, 64)
 			if err != nil {
-				log.Fatal(err)
+				log.Fatal(err.Error())
 			}
 		}
 	}
 
-	return min, max
+	return minv, maxv
 }
 
 func randStringValue(column *column, n int) string {
@@ -59,7 +62,7 @@ func randStringValue(column *column, n int) string {
 	return randString(randInt(1, n))
 }
 
-func randInt64Value(column *column, min int64, max int64) int64 {
+func randInt64Value(column *column, minv, maxv int64) int64 {
 	if column.hist != nil {
 		return column.hist.randInt()
 	}
@@ -67,23 +70,23 @@ func randInt64Value(column *column, min int64, max int64) int64 {
 		idx := randInt(0, len(column.set)-1)
 		data, err := strconv.ParseInt(column.set[idx], 10, 64)
 		if err != nil {
-			log.Warnf("rand int64 error: %s", err)
+			log.Warn("rand int64 failed", zap.Error(err))
 		}
 		return data
 	}
 
-	min, max = intRangeValue(column, min, max)
-	return randInt64(min, max)
+	minv, maxv = intRangeValue(column, minv, maxv)
+	return randInt64(minv, maxv)
 }
 
-func uniqInt64Value(column *column, min int64, max int64) int64 {
-	min, max = intRangeValue(column, min, max)
-	column.data.setInitInt64Value(column.step, min, max)
-	return column.data.uniqInt64()
+func nextInt64Value(column *column, minv int64, maxv int64) int64 {
+	minv, maxv = intRangeValue(column, minv, maxv)
+	column.data.setInitInt64Value(minv, maxv)
+	return column.data.nextInt64()
 }
 
 func intToDecimalString(intValue int64, decimal int) string {
-	data := fmt.Sprintf("%d", intValue)
+	data := strconv.FormatInt(intValue, 10)
 
 	// add leading zero
 	if len(data) < decimal {
@@ -102,7 +105,7 @@ func intToDecimalString(intValue int64, decimal int) string {
 
 func genRowDatas(table *table, count int) ([]string, error) {
 	datas := make([]string, 0, count)
-	for i := 0; i < count; i++ {
+	for range count {
 		data, err := genRowData(table)
 		if err != nil {
 			return nil, errors.Trace(err)
@@ -114,7 +117,7 @@ func genRowDatas(table *table, count int) ([]string, error) {
 }
 
 func genRowData(table *table) (string, error) {
-	var values []byte
+	var values []byte //nolint: prealloc
 	for _, column := range table.columns {
 		data, err := genColumnData(table, column)
 		if err != nil {
@@ -129,16 +132,31 @@ func genRowData(table *table) (string, error) {
 	return sql, nil
 }
 
+// #nosec G404
 func genColumnData(table *table, column *column) (string, error) {
 	tp := column.tp
-	_, isUnique := table.uniqIndices[column.name]
-	isUnsigned := mysql.HasUnsignedFlag(tp.Flag)
+	incremental := column.incremental
+	if incremental {
+		incremental = uint32(rand.Int31n(100))+1 <= column.data.probability
+		// If incremental, there is only one worker, so it is safe to directly access datum.
+		if !incremental && column.data.remains > 0 {
+			column.data.remains--
+		}
+	}
+	if _, ok := table.uniqIndices[column.name]; ok {
+		incremental = true
+	}
+	isUnsigned := mysql.HasUnsignedFlag(tp.GetFlag())
 
-	switch tp.Tp {
+	switch tp.GetType() {
 	case mysql.TypeTiny:
 		var data int64
-		if isUnique {
-			data = uniqInt64Value(column, 0, math.MaxUint8)
+		if incremental {
+			if isUnsigned {
+				data = nextInt64Value(column, 0, math.MaxUint8)
+			} else {
+				data = nextInt64Value(column, math.MinInt8, math.MaxInt8)
+			}
 		} else {
 			if isUnsigned {
 				data = randInt64Value(column, 0, math.MaxUint8)
@@ -149,8 +167,12 @@ func genColumnData(table *table, column *column) (string, error) {
 		return strconv.FormatInt(data, 10), nil
 	case mysql.TypeShort:
 		var data int64
-		if isUnique {
-			data = uniqInt64Value(column, 0, math.MaxUint16)
+		if incremental {
+			if isUnsigned {
+				data = nextInt64Value(column, 0, math.MaxUint16)
+			} else {
+				data = nextInt64Value(column, math.MinInt16, math.MaxInt16)
+			}
 		} else {
 			if isUnsigned {
 				data = randInt64Value(column, 0, math.MaxUint16)
@@ -161,8 +183,12 @@ func genColumnData(table *table, column *column) (string, error) {
 		return strconv.FormatInt(data, 10), nil
 	case mysql.TypeLong:
 		var data int64
-		if isUnique {
-			data = uniqInt64Value(column, 0, math.MaxUint32)
+		if incremental {
+			if isUnsigned {
+				data = nextInt64Value(column, 0, math.MaxUint32)
+			} else {
+				data = nextInt64Value(column, math.MinInt32, math.MaxInt32)
+			}
 		} else {
 			if isUnsigned {
 				data = randInt64Value(column, 0, math.MaxUint32)
@@ -173,8 +199,12 @@ func genColumnData(table *table, column *column) (string, error) {
 		return strconv.FormatInt(data, 10), nil
 	case mysql.TypeLonglong:
 		var data int64
-		if isUnique {
-			data = uniqInt64Value(column, 0, math.MaxInt64)
+		if incremental {
+			if isUnsigned {
+				data = nextInt64Value(column, 0, math.MaxInt64-1)
+			} else {
+				data = nextInt64Value(column, math.MinInt32, math.MaxInt32)
+			}
 		} else {
 			if isUnsigned {
 				data = randInt64Value(column, 0, math.MaxInt64-1)
@@ -185,26 +215,23 @@ func genColumnData(table *table, column *column) (string, error) {
 		return strconv.FormatInt(data, 10), nil
 	case mysql.TypeVarchar, mysql.TypeString, mysql.TypeTinyBlob, mysql.TypeBlob, mysql.TypeMediumBlob, mysql.TypeLongBlob:
 		data := []byte{'\''}
-		if isUnique {
-			data = append(data, []byte(column.data.uniqString(tp.Flen))...)
+		if incremental {
+			data = append(data, []byte(column.data.nextString(tp.GetFlen()))...)
 		} else {
-			data = append(data, []byte(randStringValue(column, tp.Flen))...)
+			data = append(data, []byte(randStringValue(column, tp.GetFlen()))...)
 		}
 
 		data = append(data, '\'')
 		return string(data), nil
 	case mysql.TypeFloat, mysql.TypeDouble:
 		var data float64
-		if isUnique {
-			data = float64(uniqInt64Value(column, 0, math.MaxInt64))
-		} else {
-			if column.hist != nil {
-				if tp.Tp == mysql.TypeDouble {
-					data = column.hist.randFloat64()
-				} else {
-					data = float64(column.hist.randFloat32())
-				}
+		if incremental {
+			if isUnsigned {
+				data = float64(nextInt64Value(column, 0, math.MaxInt64-1))
+			} else {
+				data = float64(nextInt64Value(column, math.MinInt32, math.MaxInt32))
 			}
+		} else {
 			if isUnsigned {
 				data = float64(randInt64Value(column, 0, math.MaxInt64-1))
 			} else {
@@ -214,8 +241,8 @@ func genColumnData(table *table, column *column) (string, error) {
 		return strconv.FormatFloat(data, 'f', -1, 64), nil
 	case mysql.TypeDate:
 		data := []byte{'\''}
-		if isUnique {
-			data = append(data, []byte(column.data.uniqDate())...)
+		if incremental {
+			data = append(data, []byte(column.data.nextDate())...)
 		} else {
 			data = append(data, []byte(randDate(column))...)
 		}
@@ -224,8 +251,8 @@ func genColumnData(table *table, column *column) (string, error) {
 		return string(data), nil
 	case mysql.TypeDatetime, mysql.TypeTimestamp:
 		data := []byte{'\''}
-		if isUnique {
-			data = append(data, []byte(column.data.uniqTimestamp())...)
+		if incremental {
+			data = append(data, []byte(column.data.nextTimestamp())...)
 		} else {
 			data = append(data, []byte(randTimestamp(column))...)
 		}
@@ -234,8 +261,8 @@ func genColumnData(table *table, column *column) (string, error) {
 		return string(data), nil
 	case mysql.TypeDuration:
 		data := []byte{'\''}
-		if isUnique {
-			data = append(data, []byte(column.data.uniqTime())...)
+		if incremental {
+			data = append(data, []byte(column.data.nextTime())...)
 		} else {
 			data = append(data, []byte(randTime(column))...)
 		}
@@ -244,22 +271,26 @@ func genColumnData(table *table, column *column) (string, error) {
 		return string(data), nil
 	case mysql.TypeYear:
 		data := []byte{'\''}
-		if isUnique {
-			data = append(data, []byte(column.data.uniqYear())...)
+		if incremental {
+			data = append(data, []byte(column.data.nextYear())...)
 		} else {
 			data = append(data, []byte(randYear(column))...)
 		}
 
 		data = append(data, '\'')
 		return string(data), nil
-	case mysql.TypeNewDecimal, mysql.TypeDecimal:
-		var limit = int64(math.Pow10(tp.Flen))
+	case mysql.TypeNewDecimal:
+		var limit = int64(math.Pow10(tp.GetFlen()))
 		var intVal int64
 		if limit < 0 {
 			limit = math.MaxInt64
 		}
-		if isUnique {
-			intVal = uniqInt64Value(column, 0, limit-1)
+		if incremental {
+			if isUnsigned {
+				intVal = nextInt64Value(column, 0, limit-1)
+			} else {
+				intVal = nextInt64Value(column, (-limit+1)/2, (limit-1)/2)
+			}
 		} else {
 			if isUnsigned {
 				intVal = randInt64Value(column, 0, limit-1)
@@ -267,14 +298,14 @@ func genColumnData(table *table, column *column) (string, error) {
 				intVal = randInt64Value(column, (-limit+1)/2, (limit-1)/2)
 			}
 		}
-		return intToDecimalString(intVal, tp.Decimal), nil
+		return intToDecimalString(intVal, tp.GetDecimal()), nil
 	default:
 		return "", errors.Errorf("unsupported column type - %v", column)
 	}
 }
 
 func execSQL(db *sql.DB, sql string) error {
-	if len(sql) == 0 {
+	if sql == "" {
 		return nil
 	}
 
@@ -287,13 +318,18 @@ func execSQL(db *sql.DB, sql string) error {
 }
 
 func createDB(cfg DBConfig) (*sql.DB, error) {
-	dbDSN := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8", cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Name)
-	db, err := sql.Open("mysql", dbDSN)
+	driverCfg := mysql2.NewConfig()
+	driverCfg.User = cfg.User
+	driverCfg.Passwd = cfg.Password
+	driverCfg.Net = "tcp"
+	driverCfg.Addr = cfg.Host + ":" + strconv.Itoa(cfg.Port)
+	driverCfg.DBName = cfg.Name
+
+	c, err := mysql2.NewConnector(driverCfg)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-
-	return db, nil
+	return sql.OpenDB(c), nil
 }
 
 func closeDB(db *sql.DB) error {
@@ -302,7 +338,7 @@ func closeDB(db *sql.DB) error {
 
 func createDBs(cfg DBConfig, count int) ([]*sql.DB, error) {
 	dbs := make([]*sql.DB, 0, count)
-	for i := 0; i < count; i++ {
+	for range count {
 		db, err := createDB(cfg)
 		if err != nil {
 			return nil, errors.Trace(err)
@@ -318,7 +354,7 @@ func closeDBs(dbs []*sql.DB) {
 	for _, db := range dbs {
 		err := closeDB(db)
 		if err != nil {
-			log.Errorf("close db failed - %v", err)
+			log.Error("close DB failed", zap.Error(err))
 		}
 	}
 }

@@ -8,29 +8,31 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	_ "net/http/pprof"
 	"sync"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
-
-	"github.com/juju/errors"
-	"github.com/pingcap/tidb/kv"
-	"github.com/pingcap/tidb/store/tikv"
-	"github.com/pingcap/tidb/terror"
+	"github.com/pingcap/errors"
+	"github.com/pingcap/log"
+	"github.com/pingcap/tidb/pkg/kv"
+	"github.com/pingcap/tidb/pkg/parser/terror"
+	"github.com/pingcap/tidb/pkg/store/driver"
 	"github.com/prometheus/client_golang/prometheus"
-	log "github.com/sirupsen/logrus"
-	"golang.org/x/net/context"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.uber.org/zap"
 )
 
 var (
@@ -39,9 +41,6 @@ var (
 	workerCnt = flag.Int("C", 400, "concurrent num")
 	pdAddr    = flag.String("pd", "localhost:2379", "pd address:localhost:2379")
 	valueSize = flag.Int("V", 5, "value size in byte")
-	sslCA     = flag.String("cacert", "", "path of file that contains list of trusted SSL CAs.")
-	sslCert   = flag.String("cert", "", "path of file that contains X509 certificate in PEM format.")
-	sslKey    = flag.String("key", "", "path of file that contains X509 key in PEM format.")
 
 	txnCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -71,7 +70,7 @@ var (
 
 // Init initializes information.
 func Init() {
-	driver := tikv.Driver{}
+	driver := driver.TiKVDriver{}
 	var err error
 	store, err = driver.Open(fmt.Sprintf("tikv://%s?cluster=1", *pdAddr))
 	terror.MustNil(err)
@@ -79,7 +78,7 @@ func Init() {
 	prometheus.MustRegister(txnCounter)
 	prometheus.MustRegister(txnRolledbackCounter)
 	prometheus.MustRegister(txnDurations)
-	http.Handle("/metrics", prometheus.Handler())
+	http.Handle("/metrics", promhttp.Handler())
 
 	go func() {
 		err1 := http.ListenAndServe(":9191", nil)
@@ -92,16 +91,16 @@ func batchRW(value []byte) {
 	wg := sync.WaitGroup{}
 	base := *dataCnt / *workerCnt
 	wg.Add(*workerCnt)
-	for i := 0; i < *workerCnt; i++ {
+	for i := range *workerCnt {
 		go func(i int) {
 			defer wg.Done()
-			for j := 0; j < base; j++ {
+			for j := range base {
 				txnCounter.WithLabelValues("txn").Inc()
 				start := time.Now()
 				k := base*i + j
 				txn, err := store.Begin()
 				if err != nil {
-					log.Fatal(err)
+					log.Fatal(err.Error())
 				}
 				key := fmt.Sprintf("key_%d", k)
 				err = txn.Set([]byte(key), value)
@@ -121,7 +120,7 @@ func batchRW(value []byte) {
 
 func main() {
 	flag.Parse()
-	log.SetLevel(log.ErrorLevel)
+	log.SetLevel(zap.ErrorLevel)
 	Init()
 
 	value := make([]byte, *valueSize)
@@ -130,8 +129,13 @@ func main() {
 	resp, err := http.Get("http://localhost:9191/metrics")
 	terror.MustNil(err)
 
-	defer terror.Call(resp.Body.Close)
-	text, err1 := ioutil.ReadAll(resp.Body)
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Error("function call errored", zap.Error(err), zap.Stack("stack"))
+		}
+	}()
+
+	text, err1 := io.ReadAll(resp.Body)
 	terror.Log(errors.Trace(err1))
 
 	fmt.Println(string(text))
